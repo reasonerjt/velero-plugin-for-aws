@@ -27,6 +27,7 @@ func main() {
 		BindFlags(pflag.CommandLine).
 		RegisterObjectStore("velero.io/aws", newAwsObjectStore).
 		RegisterVolumeSnapshotter("velero.io/aws", newAwsVolumeSnapshotter).
+		RegisterBackupItemAction("velero.io/aws", newAwsBackupItemAction).
 		Serve()
 }
 
@@ -36,4 +37,8 @@ func newAwsObjectStore(logger logrus.FieldLogger) (interface{}, error) {
 
 func newAwsVolumeSnapshotter(logger logrus.FieldLogger) (interface{}, error) {
 	return newVolumeSnapshotter(logger), nil
+}
+
+func newAwsBackupItemAction(logger logrus.FieldLogger) (interface{}, error) {
+	return newBackupItemAction(logger), nil
 }
