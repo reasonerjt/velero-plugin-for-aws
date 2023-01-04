@@ -18,6 +18,7 @@ package main
 
 import (
 	"crypto/tls"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -85,6 +86,48 @@ func isValidSignatureVersion(signatureVersion string) bool {
 		return true
 	}
 	return false
+}
+
+type someErr struct {
+}
+
+func (s someErr) Error() string {
+	return "this is some error!"
+}
+
+type awsError awserr.Error
+
+// A multiUploadError wraps the upload ID of a failed s3 multipart upload.
+// Composed of BaseError for code, message, and original error
+//
+// Should be used for an error that occurred failing a S3 multipart upload,
+// and a upload ID is available. If an uploadID is not available a more relevant
+type multiUploadError struct {
+	awsError
+
+	// ID for multipart upload which failed.
+	uploadID string
+}
+
+// Error returns the string representation of the error.
+//
+// See apierr.BaseError ErrorWithExtra for output format
+//
+// Satisfies the error interface.
+func (m multiUploadError) Error() string {
+	extra := fmt.Sprintf("upload id: %s", m.uploadID)
+	return awserr.SprintError(m.Code(), m.Message(), extra, m.OrigErr())
+}
+
+// String returns the string representation of the error.
+// Alias for Error to satisfy the stringer interface.
+func (m multiUploadError) String() string {
+	return m.Error()
+}
+
+// UploadID returns the id of the S3 upload which failed.
+func (m multiUploadError) UploadID() string {
+	return m.uploadID
 }
 
 func (o *ObjectStore) Init(config map[string]string) error {
@@ -336,10 +379,15 @@ func (o *ObjectStore) PutObject(bucket, key string, body io.Reader) error {
 	case o.serverSideEncryption != "":
 		req.ServerSideEncryption = aws.String(o.serverSideEncryption)
 	}
-
-	_, err := o.s3Uploader.Upload(req)
-
-	return errors.Wrapf(err, "error putting object %s", key)
+	myErr := &multiUploadError{
+		awsError: awserr.New(
+			"MultipartUpload",
+			"upload multipart failed",
+			awserr.New("code-level2", "message-level2", fmt.Errorf("the actual error"))),
+		uploadID: "some-uploadID",
+	}
+	//	_, _ := o.s3Uploader.Upload(req)
+	return errors.Wrapf(myErr, "error putting object %s", key)
 }
 
 const notFoundCode = "NotFound"
