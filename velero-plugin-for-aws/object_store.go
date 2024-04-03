@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
@@ -50,6 +51,7 @@ const (
 	caCertKey                    = "caCert"
 	enableSharedConfigKey        = "enableSharedConfig"
 	taggingKey                   = "tagging"
+	checksumAlgKey               = "checksumAlgorithm"
 )
 
 type s3Interface interface {
@@ -73,6 +75,7 @@ type ObjectStore struct {
 	signatureVersion     string
 	serverSideEncryption string
 	tagging              string
+	checksumAlg          string
 }
 
 func newObjectStore(logger logrus.FieldLogger) *ObjectStore {
@@ -94,6 +97,7 @@ func (o *ObjectStore) Init(config map[string]string) error {
 		insecureSkipTLSVerifyKey,
 		enableSharedConfigKey,
 		taggingKey,
+		checksumAlgKey,
 	); err != nil {
 		return err
 	}
@@ -127,24 +131,37 @@ func (o *ObjectStore) Init(config map[string]string) error {
 		}
 	}
 
-	// AWS (not an alternate S3-compatible API) and region not
-	// explicitly specified: determine the bucket's region
-	if s3URL == "" && region == "" {
-		var err error
-		region, err = GetBucketRegion(bucket, s3ForcePathStyle)
-		if err != nil {
-			o.log.Errorf("Failed to get bucket region, bucket: %s, error: %v", bucket, err)
-			return err
-		}
-	}
-
 	if insecureSkipTLSVerifyVal != "" {
 		if insecureSkipTLSVerify, err = strconv.ParseBool(insecureSkipTLSVerifyVal); err != nil {
 			return errors.Wrapf(err, "could not parse %s (expected bool)", insecureSkipTLSVerifyKey)
 		}
 	}
 
-	cfg, err := newAWSConfig(region, credentialProfile, credentialsFile, insecureSkipTLSVerify, caCert)
+	// AWS (not an alternate S3-compatible API) and region not
+	// explicitly specified: determine the bucket's region
+	if s3URL == "" && region == "" {
+		cfg, err := newConfigBuilder(o.log).WithTLSSettings(insecureSkipTLSVerify, caCert).Build()
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		client, err := newS3Client(cfg, s3URL, s3ForcePathStyle)
+		if err != nil {
+			return errors.WithStack(err)
+		}
+		region, err = manager.GetBucketRegion(context.Background(), client, bucket)
+		if err != nil {
+			o.log.Errorf("Failed to determine bucket's region bucket: %s, error: %v", bucket, err)
+			return err
+		}
+		if region == "" {
+			return fmt.Errorf("unable to determine bucket's region, bucket: %s", bucket)
+		}
+	}
+
+	cfg, err := newConfigBuilder(o.log).WithRegion(region).
+		WithProfile(credentialProfile).
+		WithCredentialsFile(credentialsFile).
+		WithTLSSettings(insecureSkipTLSVerify, caCert).Build()
 	if err != nil {
 		return errors.WithStack(err)
 	}
@@ -187,7 +204,20 @@ func (o *ObjectStore) Init(config map[string]string) error {
 			return err
 		}
 	}
+	if alg, ok := config[checksumAlgKey]; ok {
+		if !validChecksumAlg(alg) {
+			return errors.Errorf("invalid checksum algorithm: %s", alg)
+		}
+		o.checksumAlg = alg
+	} else {
+		o.checksumAlg = string(types.ChecksumAlgorithmCrc32)
+	}
 	return nil
+}
+
+func validChecksumAlg(alg string) bool {
+	return alg == string(types.ChecksumAlgorithmCrc32) || alg == string(types.ChecksumAlgorithmCrc32c) ||
+		alg == string(types.ChecksumAlgorithmSha1) || alg == string(types.ChecksumAlgorithmSha256) || alg == ""
 }
 
 func readCustomerKey(customerKeyEncryptionFile string) (string, error) {
@@ -239,6 +269,10 @@ func (o *ObjectStore) PutObject(bucket, key string, body io.Reader) error {
 	// otherwise, use the SSE algorithm specified, if any
 	case o.serverSideEncryption != "":
 		input.ServerSideEncryption = types.ServerSideEncryption(o.serverSideEncryption)
+	}
+
+	if o.checksumAlg != "" {
+		input.ChecksumAlgorithm = types.ChecksumAlgorithm(o.checksumAlg)
 	}
 
 	_, err := o.s3Uploader.Upload(context.Background(), input)
