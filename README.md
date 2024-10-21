@@ -25,6 +25,15 @@ Below is a listing of plugin versions and respective Velero versions that are co
 | v1.7.x         | v1.11.x        |
 | v1.6.x         | v1.10.x        |
 
+## Non-AWS S3 compatible provider known issues with plugin v1.10.x (aws-sdk-go-v2):
+| Cloud Provider      |Notes|Velero Issue|Cloud Provider Issue|
+|-|-|-|-|
+|Google Cloud Storage|[Should use GCP plugin instead](https://github.com/vmware-tanzu/velero-plugin-for-gcp)||https://issuetracker.google.com/issues/256641357|
+|Net App|`operation error S3: PutObject, https response error StatusCode: 501, RequestID: , HostID: , api error NotImplemented: The s3 command you requested is not implemented.`|https://github.com/vmware-tanzu/velero/issues/7828 https://github.com/vmware-tanzu/velero/issues/8152||
+|Oracle||https://github.com/vmware-tanzu/velero/issues/8013||
+|IBM COS|checksumAlgorithm="" should work if [replication is not enabled](https://github.com/vmware-tanzu/velero/issues/7543#issuecomment-2225803682)|https://github.com/vmware-tanzu/velero/issues/7543||
+|Hitachi Content Platform (HCP)||||
+|Cloudian||https://github.com/vmware-tanzu/velero/issues/8264||
 ## Filing issues
 
 If you would like to file a GitHub issue for the plugin, please open the issue on the [core Velero repo][103]
@@ -76,7 +85,8 @@ For more information, see [the AWS documentation on IAM users][10].
 
     If you'll be using Velero to backup multiple clusters with multiple S3 buckets, it may be desirable to create a unique username per cluster rather than the default `velero`.
 
-2. Attach policies to give `velero` the necessary permissions:
+2. Attach policies to give `velero` the necessary permissions (note that `s3:PutObjectTagging` is only needed 
+   if you make use of the `config.tagging` field in the `BackupStorageLocation` spec):
 
     ```
     cat > velero-policy.json <<EOF
@@ -101,6 +111,7 @@ For more information, see [the AWS documentation on IAM users][10].
                     "s3:GetObject",
                     "s3:DeleteObject",
                     "s3:PutObject",
+                    "s3:PutObjectTagging",
                     "s3:AbortMultipartUpload",
                     "s3:ListMultipartUploadParts"
                 ],
@@ -199,7 +210,8 @@ It can be set up for Velero by creating a role that will have required permissio
     aws iam create-role --role-name velero --assume-role-policy-document file://./velero-trust-policy.json
     ```
 
-3. Attach policies to give `velero` the necessary permissions:
+3. Attach policies to give `velero` the necessary permissions (note that `s3:PutObjectTagging` is only needed 
+   if you make use of the `config.tagging` field in the `BackupStorageLocation` spec):
 
     ```
     BUCKET=<YOUR_BUCKET>
@@ -225,6 +237,7 @@ It can be set up for Velero by creating a role that will have required permissio
                     "s3:GetObject",
                     "s3:DeleteObject",
                     "s3:PutObject",
+                    "s3:PutObjectTagging",
                     "s3:AbortMultipartUpload",
                     "s3:ListMultipartUploadParts"
                 ],

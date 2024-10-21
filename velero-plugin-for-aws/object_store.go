@@ -19,16 +19,18 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"slices"
+	"sort"
+	"strconv"
+	"time"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/feature/s3/manager"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
-	"io"
-	"os"
-	"sort"
-	"strconv"
-	"time"
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
@@ -137,18 +139,24 @@ func (o *ObjectStore) Init(config map[string]string) error {
 		}
 	}
 
+	cfg, err := newConfigBuilder(o.log).WithRegion(region).
+		WithProfile(credentialProfile).
+		WithCredentialsFile(credentialsFile).
+		WithTLSSettings(insecureSkipTLSVerify, caCert).Build()
+	if err != nil {
+		return errors.WithStack(err)
+	}
+
 	// AWS (not an alternate S3-compatible API) and region not
 	// explicitly specified: determine the bucket's region
+	// GetBucketRegion will attempt to get the region for a bucket using the
+	// client's configured region to determine which AWS partition to perform the query on.
 	if s3URL == "" && region == "" {
-		cfg, err := newConfigBuilder(o.log).WithTLSSettings(insecureSkipTLSVerify, caCert).Build()
+		regionClient, err := newS3Client(cfg, s3URL, s3ForcePathStyle)
 		if err != nil {
 			return errors.WithStack(err)
 		}
-		client, err := newS3Client(cfg, s3URL, s3ForcePathStyle)
-		if err != nil {
-			return errors.WithStack(err)
-		}
-		region, err = manager.GetBucketRegion(context.Background(), client, bucket)
+		region, err = manager.GetBucketRegion(context.Background(), regionClient, bucket, func(o *s3.Options) { o.Region = "us-east-1" })
 		if err != nil {
 			o.log.Errorf("Failed to determine bucket's region bucket: %s, error: %v", bucket, err)
 			return err
@@ -156,14 +164,7 @@ func (o *ObjectStore) Init(config map[string]string) error {
 		if region == "" {
 			return fmt.Errorf("unable to determine bucket's region, bucket: %s", bucket)
 		}
-	}
-
-	cfg, err := newConfigBuilder(o.log).WithRegion(region).
-		WithProfile(credentialProfile).
-		WithCredentialsFile(credentialsFile).
-		WithTLSSettings(insecureSkipTLSVerify, caCert).Build()
-	if err != nil {
-		return errors.WithStack(err)
+		cfg.Region = region
 	}
 
 	client, err := newS3Client(cfg, s3URL, s3ForcePathStyle)
@@ -216,8 +217,8 @@ func (o *ObjectStore) Init(config map[string]string) error {
 }
 
 func validChecksumAlg(alg string) bool {
-	return alg == string(types.ChecksumAlgorithmCrc32) || alg == string(types.ChecksumAlgorithmCrc32c) ||
-		alg == string(types.ChecksumAlgorithmSha1) || alg == string(types.ChecksumAlgorithmSha256) || alg == ""
+	typedAlg := types.ChecksumAlgorithm(alg)
+	return alg == "" || slices.Contains(typedAlg.Values(), typedAlg)
 }
 
 func readCustomerKey(customerKeyEncryptionFile string) (string, error) {
