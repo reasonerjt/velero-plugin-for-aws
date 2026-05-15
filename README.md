@@ -19,12 +19,13 @@ Below is a listing of plugin versions and respective Velero versions that are co
 
 | Plugin Version | Velero Version |
 |----------------|----------------|
+| v1.13.x        | v1.17.x        |
+| v1.12.x        | v1.16.x        |
 | v1.11.x        | v1.15.x        |
 | v1.10.x        | v1.14.x        |
 | v1.9.x         | v1.13.x        |
-| v1.8.x         | v1.12.x        |
 
-## Non-AWS S3 compatible provider known issues with plugin v1.10.x (aws-sdk-go-v2):
+## Non-AWS S3 compatible provider known issues with plugin v1.13.x (aws-sdk-go-v2):
 | Cloud Provider      |Notes|Velero Issue|Cloud Provider Issue|
 |-|-|-|-|
 |Google Cloud Storage|[Should use GCP plugin instead](https://github.com/vmware-tanzu/velero-plugin-for-gcp)||https://issuetracker.google.com/issues/256641357|
@@ -278,7 +279,7 @@ Install Velero, including all prerequisites, into the cluster and start the depl
 ```bash
 velero install \
     --provider aws \
-    --plugins velero/velero-plugin-for-aws:v1.10.0 \
+    --plugins velero/velero-plugin-for-aws:v1.13.0 \
     --bucket $BUCKET \
     --backup-location-config region=$REGION \
     --snapshot-location-config region=$REGION \
@@ -290,7 +291,7 @@ velero install \
 ```bash
 velero install \
     --provider aws \
-    --plugins velero/velero-plugin-for-aws:v1.10.0 \
+    --plugins velero/velero-plugin-for-aws:v1.13.0 \
     --bucket $BUCKET \
     --backup-location-config region=$REGION \
     --snapshot-location-config region=$REGION \
@@ -310,6 +311,96 @@ securityContext:
 (Optional) Specify [additional configurable parameters][8] for the `--snapshot-location-config` flag.
 
 (Optional) [Customize the Velero installation][9] further to meet your needs.
+
+## Server-Side Encryption with Customer-Provided Encryption Keys (SSE-C)
+
+Velero supports using SSE-C encryption for S3 backups. This allows you to provide your own 32-byte encryption key that S3 will use to encrypt your backup data. There are two ways to provide the customer key:
+
+### Option 1: Using a mounted file (customerKeyEncryptionFile)
+
+1. Create a Kubernetes secret containing your 32-byte encryption key:
+
+```bash
+# Generate a 32-byte key (example)
+openssl rand -out customer-key.txt 32
+
+# Create the secret
+kubectl create secret generic velero-sse-c-key \
+  -n velero \
+  --from-file=customer-key=customer-key.txt
+```
+
+2. Mount the secret in the Velero deployment:
+
+```bash
+kubectl patch deployment/velero -n velero --type='json' -p='[
+  {
+    "op": "add",
+    "path": "/spec/template/spec/volumes/-",
+    "value": {
+      "name": "sse-c-key",
+      "secret": {
+        "secretName": "velero-sse-c-key"
+      }
+    }
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/volumeMounts/-",
+    "value": {
+      "name": "sse-c-key",
+      "mountPath": "/credentials/sse-c",
+      "readOnly": true
+    }
+  }
+]'
+```
+
+3. Configure the backup storage location to use the mounted key file:
+
+```bash
+velero backup-location create default \
+  --provider aws \
+  --bucket $BUCKET \
+  --config region=$REGION,customerKeyEncryptionFile=/credentials/sse-c/customer-key
+```
+
+### Option 2: Using a Kubernetes secret directly (customerKeyEncryptionSecret)
+
+This option allows Velero to read the encryption key directly from a Kubernetes secret without mounting it as a file.
+
+1. Create a Kubernetes secret containing your 32-byte encryption key:
+
+```bash
+# Generate a 32-byte key (example)
+openssl rand 32 | kubectl create secret generic velero-sse-c-key \
+  -n velero \
+  --from-file=customer-key=/dev/stdin
+```
+
+2. Configure the backup storage location to reference the secret:
+
+```bash
+velero backup-location create default \
+  --provider aws \
+  --bucket $BUCKET \
+  --config region=$REGION,customerKeyEncryptionSecret=velero-sse-c-key/customer-key
+```
+
+The format for `customerKeyEncryptionSecret` is `secretName/key`, where:
+
+- `secretName` is the name of the Kubernetes secret
+- `key` is the key within the secret that contains the 32-byte encryption key
+
+The secret must exist in the same namespace as Velero (determined by the `VELERO_NAMESPACE` environment variable).
+
+### Important Notes about SSE-C
+
+- The customer key must be exactly 32 bytes
+- You cannot use SSE-C in combination with `kmsKeyId`
+- You must specify either `customerKeyEncryptionFile` or `customerKeyEncryptionSecret`, not both
+- Keep your encryption key secure - losing it means losing access to your backups
+- The same key must be available during restore operations
 
 For more complex installation needs, use either the Helm chart, or add `--dry-run -o yaml` options for generating the YAML representation for the installation.
 
@@ -387,6 +478,59 @@ Copy one of the returned IDs `<ID>` and use it with the `aws` CLI tool to search
     ```bash
     aws ec2 describe-tags --filters "Name=resource-id,Values=<ID>" "Name=key,Values=KubernetesCluster"
     ```
+
+## KMS Encryption for Volume Restoration
+
+When using the `ebsKmsKeyId` parameter to encrypt restored volumes, the IAM user or role used by Velero must have the following KMS permissions:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "kms:ReEncrypt*",
+        "kms:GenerateDataKey*",
+        "kms:Encrypt",
+        "kms:DescribeKey",
+        "kms:Decrypt",
+        "kms:CreateGrant",
+        "kms:ListGrants",
+        "kms:RevokeGrant",
+        "kms:RetireGrant",
+        "kms:ListRetirableGrants"
+      ],
+      "Resource": "arn:aws:kms:us-east-1:123456789012:key/*"
+    }
+  ]
+}
+```
+
+Additionally, the KMS key policy must allow the EC2 service to use the key:
+
+```json
+{
+  "Sid": "Allow EC2 to use the key for EBS encryption",
+  "Effect": "Allow",
+  "Principal": {
+    "Service": "ec2.amazonaws.com"
+  },
+  "Action": [
+    "kms:Decrypt",
+    "kms:CreateGrant",
+    "kms:DescribeKey",
+    "kms:ReEncryptFrom",
+    "kms:ReEncryptTo"
+  ],
+  "Resource": "*"
+}
+```
+
+**Important notes:**
+* The KMS key must be in the same region as the EBS volumes/snapshots
+* The KMS key must be in the `Enabled` state
+* Without proper permissions, volume restoration will fail with `AccessDeniedException` or the volume will be created but immediately deleted by AWS
 
 
 [1]: #Create-S3-bucket
